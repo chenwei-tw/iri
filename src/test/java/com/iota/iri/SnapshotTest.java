@@ -21,45 +21,34 @@ public class SnapshotTest {
 
     @Test
     public void isConsistent() throws Exception {
-        Snapshot latestSnapshot = new Snapshot(Snapshot.initialSnapshot);
-        Assert.assertTrue("Initial confirmed should be consistent", latestSnapshot.isConsistent());
-    }
-
-    @Test
-    public void diff() throws Exception {
-        Snapshot latestSnapshot = new Snapshot(Snapshot.initialSnapshot);
-        Assert.assertEquals(latestSnapshot.diff(getModifiedMap(latestSnapshot)).keySet().size(), 2);
+        Assert.assertTrue("Initial confirmed should be consistent", Snapshot.isConsistent(Snapshot.initialState));
     }
 
     @Test
     public void patch() throws Exception {
-        Snapshot latestSnapshot = new Snapshot(Snapshot.initialSnapshot);
-        Map<Hash, Long> diff = latestSnapshot.diff(getModifiedMap(latestSnapshot));
-        Snapshot newState = latestSnapshot.patch(diff, 0);
-        diff = latestSnapshot.diff(newState.getState());
+        Map.Entry<Hash, Long> firstOne = Snapshot.initialState.entrySet().iterator().next();
+        Hash someHash = new Hash("PSRQPWWIECDGDDZXHGJNMEVJNSVOSMECPPVRPEVRZFVIZYNNXZNTOTJOZNGCZNQVSPXBXTYUJUOXYASLS");
+        Map<Hash, Long> diff = new HashMap<>();
+        diff.put(firstOne.getKey(), -firstOne.getValue());
+        diff.put(someHash, firstOne.getValue());
         Assert.assertNotEquals(0, diff.size());
-        Assert.assertTrue("The ledger should be consistent", newState.isConsistent());
+        Assert.assertTrue("The ledger should be consistent", Snapshot.isConsistent(Snapshot.initialSnapshot.patchedDiff(diff)));
     }
 
     @Test
-    public void merge() throws Exception {
-        Snapshot latestSnapshot = new Snapshot(Snapshot.initialSnapshot);
-        Snapshot latestCopy = latestSnapshot.patch(latestSnapshot.diff(latestSnapshot.getState()), 0);
-        Snapshot patch = latestCopy.patch(latestCopy.diff(getModifiedMap(latestCopy)), 0);
-        latestCopy.merge(patch);
-        assertNotEquals("State should be unchanged.", latestCopy.getState(), Snapshot.initialState);
-
-        latestCopy = latestSnapshot.patch(latestSnapshot.diff(latestSnapshot.getState()), 0);
+    public void applyShouldFail() throws Exception {
+        Snapshot latestSnapshot = Snapshot.initialSnapshot.clone();
         Map<Hash, Long> badMap = new HashMap<>();
         badMap.put(new Hash("PSRQPWWIECDGDDZEHGJNMEVJNSVOSMECPPVRPEVRZFVIZYNNXZNTOTJOZNGCZNQVSPXBXTYUJUOXYASLS"), 100L);
-        latestCopy.merge(latestCopy.patch(badMap, 0));
-        assertFalse("should be inconsistent", latestCopy.isConsistent());
+        badMap.put(new Hash("ESRQPWWIECDGDDZEHGJNMEVJNSVOSMECPPVRPEVRZFVIZYNNXZNTOTJOZNGCZNQVSPXBXTYUJUOXYASLS"), -100L);
+        Map<Hash, Long> patch = latestSnapshot.patchedDiff(badMap);
+        assertFalse("should be inconsistent", Snapshot.isConsistent(latestSnapshot.patchedDiff(badMap)));
     }
 
-    private Map<Hash, Long> getModifiedMap(Snapshot fromSnapshot) {
+    private Map<Hash, Long> getModifiedMap() {
         Hash someHash = new Hash("PSRQPWWIECDGDDZXHGJNMEVJNSVOSMECPPVRPEVRZFVIZYNNXZNTOTJOZNGCZNQVSPXBXTYUJUOXYASLS");
         Map<Hash, Long> newMap;
-        newMap = (Map<Hash, Long>) new HashMap<>(fromSnapshot.getState()).clone();
+        newMap = new HashMap<>();
         Iterator<Map.Entry<Hash, Long>> iterator = newMap.entrySet().iterator();
         Map.Entry<Hash, Long> entry;
         if(iterator.hasNext()) {

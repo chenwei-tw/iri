@@ -179,7 +179,7 @@ public class Milestone {
             // Already validated.
             return VALID;
         }
-        final List<List<TransactionViewModel>> bundleTransactions = BundleValidator.validate(tangle, transactionViewModel.getBundleHash());
+        final List<List<TransactionViewModel>> bundleTransactions = BundleValidator.validate(tangle, transactionViewModel.getHash());
         if (bundleTransactions.size() == 0) {
             return INCOMPLETE;
         }
@@ -225,7 +225,7 @@ public class Milestone {
                  milestoneViewModel = milestoneViewModel.next(tangle)) {
                 if (transactionValidator.checkSolidity(milestoneViewModel.getHash(), true) &&
                         milestoneViewModel.index() >= latestSolidSubtangleMilestoneIndex &&
-                        ledgerValidator.updateSnapshot(latestSnapshot, milestoneViewModel)) {
+                        ledgerValidator.updateSnapshot(milestoneViewModel)) {
                     latestSolidSubtangleMilestone = milestoneViewModel.getHash();
                     latestSolidSubtangleMilestoneIndex = milestoneViewModel.index();
                 } else {

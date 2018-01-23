@@ -391,7 +391,7 @@ public class API {
                 state = false;
                 info = "tails are not solid (missing a referenced tx): " + transaction;
                 break;
-            } else if (BundleValidator.validate(instance.tangle, txVM.getBundleHash()).size() == 0) {
+            } else if (BundleValidator.validate(instance.tangle, txVM.getHash()).size() == 0) {
                 state = false;
                 info = "tails are not consistent (bundle is invalid): " + transaction;
                 break;
@@ -399,9 +399,15 @@ public class API {
         }
 
         if (state) {
-            if (!instance.ledgerValidator.checkConsistency(instance.milestone.latestSnapshot, transactions)) {
-                state = false;
-                info = "tails are not consistent (would lead to inconsistent ledger state)";
+            instance.milestone.latestSnapshot.rwlock.readLock().lock();
+            try {
+
+                if (!instance.ledgerValidator.checkConsistency(transactions)) {
+                    state = false;
+                    info = "tails are not consistent (would lead to inconsistent ledger state)";
+                }
+            } finally {
+                instance.milestone.latestSnapshot.rwlock.readLock().unlock();
             }
         }
 
@@ -529,28 +535,32 @@ public class API {
                 referenceHash = null;
             }
         }
-        Snapshot referenceSnapshot;
-        synchronized (instance.milestone.latestSnapshot.snapshotSyncObject) {
-            referenceSnapshot = new Snapshot(instance.milestone.latestSnapshot);
-        }
-        for(int i = 0; i < tipsToApprove; i++) {
-            tips[i] = instance.tipsManager.transactionToApprove(referenceSnapshot, referenceHash, tips[0], depth, randomWalkCount, random);
-            if (tips[i] == null) {
-                return null;
-            }
-        }
-        API.incCounter_getTxToApprove();
-        if ( ( getCounter_getTxToApprove() % 100) == 0 ) {
-            String sb = "Last 100 getTxToApprove consumed " +
-                    API.getEllapsedTime_getTxToApprove() / 1000000000L +
-                    " seconds processing time.";
-            log.info(sb);
-            counter_getTxToApprove = 0;
-            ellapsedTime_getTxToApprove = 0L;
-        }
 
-        if (instance.ledgerValidator.checkConsistency(instance.milestone.latestSnapshot, Arrays.asList(tips))) {
-            return tips;
+        instance.milestone.latestSnapshot.rwlock.readLock().lock();
+        try {
+            Set<Hash> visitedHashes = new HashSet<>();
+            Map<Hash, Long> diff = new HashMap<>();
+            for (int i = 0; i < tipsToApprove; i++) {
+                tips[i] = instance.tipsManager.transactionToApprove(visitedHashes, diff, referenceHash, tips[0], depth, randomWalkCount, random);
+                if (tips[i] == null) {
+                    return null;
+                }
+            }
+            API.incCounter_getTxToApprove();
+            if ((getCounter_getTxToApprove() % 100) == 0) {
+                String sb = "Last 100 getTxToApprove consumed " +
+                        API.getEllapsedTime_getTxToApprove() / 1000000000L +
+                        " seconds processing time.";
+                log.info(sb);
+                counter_getTxToApprove = 0;
+                ellapsedTime_getTxToApprove = 0L;
+            }
+
+            if (instance.ledgerValidator.checkConsistency(Arrays.asList(tips))) {
+                return tips;
+            }
+        } finally {
+            instance.milestone.latestSnapshot.rwlock.readLock().unlock();
         }
         throw new RuntimeException("inconsistent tips pair selected");
     }
@@ -797,56 +807,40 @@ public class API {
         final List<Hash> addresses = addrss.stream().map(address -> (new Hash(address)))
                 .collect(Collectors.toCollection(LinkedList::new));
         final List<Hash> hashes;
+        final Map<Hash, Long> balances = new HashMap<>();
+        instance.milestone.latestSnapshot.rwlock.readLock().lock();
+        final int index = instance.milestone.latestSnapshot.index();
         if (tips == null || tips.size() == 0) {
             hashes = Collections.singletonList(instance.milestone.latestSolidSubtangleMilestone);
         } else {
             hashes = tips.stream().map(address -> (new Hash(address)))
                     .collect(Collectors.toCollection(LinkedList::new));
         }
-
-        final Map<Hash, Long> balances = new HashMap<>();
-        final int index;
-        Snapshot referenceSnapshot;
-        synchronized (instance.milestone.latestSnapshot.snapshotSyncObject) {
-            referenceSnapshot = new Snapshot(instance.milestone.latestSnapshot);
-        }
-        index = referenceSnapshot.index();
-        for(Hash hash: hashes) {
-            if (!TransactionViewModel.exists(instance.tangle, hash)) {
-                return ErrorResponse.create("Tip not found: " + hash.toString());
+        try {
+            for (final Hash address : addresses) {
+                Long value = instance.milestone.latestSnapshot.getBalance(address);
+                if (value == null) value = 0L;
+                balances.put(address, value);
             }
-            if (!instance.ledgerValidator.isTipConsistent(referenceSnapshot, hash)) {
-                return ErrorResponse.create("Tips are not consistent");
-            }
-        }
-        for (final Hash address : addresses) {
-            balances.put(address, referenceSnapshot.getState().containsKey(address) ? referenceSnapshot.getState().get(address) : Long.valueOf(0));
-        }
 
+            final Set<Hash> visitedHashes;
+            final Map<Hash, Long> diff;
 
-        final Queue<Hash> nonAnalyzedTransactions = new LinkedList<>(hashes);
-        Hash hash;
-        while ((hash = nonAnalyzedTransactions.poll()) != null) {
-
-            if (referenceSnapshot.approvedHashes.add(hash)) {
-
-                final TransactionViewModel transactionViewModel = TransactionViewModel.fromHash(instance.tangle, hash);
-
-                if(transactionViewModel.snapshotIndex() == 0 || transactionViewModel.snapshotIndex() > index) {
-                    if (transactionViewModel.value() != 0) {
-
-                        final Hash address = transactionViewModel.getAddressHash();
-                        final Long balance = balances.get(address);
-                        if (balance != null) {
-
-                            balances.put(address, balance + transactionViewModel.value());
-                        }
-                    }
-                    nonAnalyzedTransactions.offer(transactionViewModel.getTrunkTransactionHash());
-                    nonAnalyzedTransactions.offer(transactionViewModel.getBranchTransactionHash());
+            visitedHashes = new HashSet<>();
+            diff = new HashMap<>();
+            for (Hash tip : hashes) {
+                if (!TransactionViewModel.exists(instance.tangle, tip)) {
+                    return ErrorResponse.create("Tip not found: " + tip.toString());
+                }
+                if (!instance.ledgerValidator.updateDiff(visitedHashes, diff, tip)) {
+                    return ErrorResponse.create("Tips are not consistent");
                 }
             }
+            diff.forEach((key, value) -> balances.computeIfPresent(key, (hash, aLong) -> value + aLong));
+        } finally {
+            instance.milestone.latestSnapshot.rwlock.readLock().unlock();
         }
+
         final List<String> elements = addresses.stream().map(address -> balances.get(address).toString())
                 .collect(Collectors.toCollection(LinkedList::new));
 
