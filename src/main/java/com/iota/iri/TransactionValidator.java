@@ -29,6 +29,10 @@ public class TransactionValidator {
     private final TransactionRequester transactionRequester;
     private final MessageQ messageQ;
     private int MIN_WEIGHT_MAGNITUDE = 81;
+    private static long MIN_TIMESTAMP = 1517180400;
+    private static long MIN_TIMESTAMP_MS = MIN_TIMESTAMP * 1000;
+    private static long MAX_TIMESTAMP_FUTURE = 2 * 60 * 60;
+    private static long MAX_TIMESTAMP_FUTURE_MS = MAX_TIMESTAMP_FUTURE * 1000;
 
     private Thread newSolidThread;
 
@@ -69,10 +73,20 @@ public class TransactionValidator {
         return MIN_WEIGHT_MAGNITUDE;
     }
 
-    private static void runValidation(TransactionViewModel transactionViewModel, final int minWeightMagnitude) {
+    private static boolean hasInvalidTimestamp(TransactionViewModel transactionViewModel) {
+        if (transactionViewModel.getAttachmentTimestamp() == 0) {
+            return transactionViewModel.getTimestamp() < MIN_TIMESTAMP && !Objects.equals(transactionViewModel.getHash(), Hash.NULL_HASH)
+                    || transactionViewModel.getTimestamp() > (System.currentTimeMillis() / 1000) + MAX_TIMESTAMP_FUTURE;
+        }
+        return transactionViewModel.getAttachmentTimestamp() < MIN_TIMESTAMP_MS
+                || transactionViewModel.getAttachmentTimestamp() > System.currentTimeMillis() + MAX_TIMESTAMP_FUTURE_MS;
+    }
+
+    public static void runValidation(TransactionViewModel transactionViewModel, final int minWeightMagnitude) {
         transactionViewModel.setMetadata();
-        if(transactionViewModel.getTimestamp() < 1508760000 && !transactionViewModel.getHash().equals(Hash.NULL_HASH)) {
-            throw new RuntimeException("Invalid transaction timestamp.");
+        transactionViewModel.setAttachmentData();
+        if(hasInvalidTimestamp(transactionViewModel)) {
+            throw new StaleTimestampException("Invalid transaction timestamp.");
         }
         for (int i = VALUE_TRINARY_OFFSET + VALUE_USABLE_TRINARY_SIZE; i < VALUE_TRINARY_OFFSET + VALUE_TRINARY_SIZE; i++) {
             if (transactionViewModel.trits()[i] != 0) {
@@ -252,4 +266,9 @@ public class TransactionValidator {
         return approovee.isSolid();
     }
 
+    public static class StaleTimestampException extends RuntimeException {
+        public StaleTimestampException (String message) {
+            super(message);
+        }
+    }
 }
