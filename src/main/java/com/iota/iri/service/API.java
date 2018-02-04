@@ -2,7 +2,8 @@ package com.iota.iri.service;
 
 import static io.undertow.Handlers.path;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -19,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
@@ -67,8 +67,6 @@ import io.undertow.util.StatusCodes;
 @SuppressWarnings("unchecked")
 public class API {
 
-    public static final String REFERENCE_TRANSACTION_NOT_FOUND = "reference transaction not found";
-    public static final String REFERENCE_TRANSACTION_TOO_OLD = "reference transaction is too old";
     private static final Logger log = LoggerFactory.getLogger(API.class);
     private final IXI ixi;
 
@@ -92,10 +90,13 @@ public class API {
     private final int maxRequestList;
     private final int maxGetTrytes;
     private final int maxBodyLength;
+    private final double newTransactionsRateLimit;
     private final static String overMaxErrorMessage = "Could not complete request";
     private final static String invalidParams = "Invalid parameters";
 
-    private ConcurrentHashMap<Hash, Boolean> previousEpochsSpentAddresses;
+    private AtomicInteger newTransactionsLimit;
+    private HashMap<InetAddress,AtomicInteger> broadcastStoreCounters;
+    private AtomicLong broadcastStoreTimer;
 
     private final static char ZERO_LENGTH_ALLOWED = 'Y';
     private final static char ZERO_LENGTH_NOT_ALLOWED = 'N';
@@ -111,13 +112,14 @@ public class API {
         maxGetTrytes = instance.configuration.integer(DefaultConfSettings.MAX_GET_TRYTES);
         maxBodyLength = instance.configuration.integer(DefaultConfSettings.MAX_BODY_LENGTH);
 
-        previousEpochsSpentAddresses = new ConcurrentHashMap<>();
-
+        newTransactionsRateLimit = instance.configuration.doubling(Configuration.DefaultConfSettings.API_NEW_TX_LIMIT.name());
+        newTransactionsLimit = new AtomicInteger(0);
+        setApiRateLimit(newTransactionsRateLimit);
+        broadcastStoreCounters = new HashMap<>();
+        broadcastStoreTimer = new AtomicLong(0);
     }
 
     public void init() throws IOException {
-        readPreviousEpochsSpentAddresses();
-
         final int apiPort = instance.configuration.integer(DefaultConfSettings.PORT);
         final String apiHost = instance.configuration.string(DefaultConfSettings.API_HOST);
 
@@ -149,24 +151,6 @@ public class API {
                     }
                 }))).build();
         server.start();
-    }
-
-    private void readPreviousEpochsSpentAddresses() {
-        if (!SignedFiles.isFileSignatureValid("/previousEpochsSpentAddresses.txt", "/previousEpochsSpentAddresses.sig",
-                Snapshot.SNAPSHOT_PUBKEY, Snapshot.SNAPSHOT_PUBKEY_DEPTH, Snapshot.SPENT_ADDRESSES_INDEX)) {
-            throw new RuntimeException("Failed to load previousEpochsSpentAddresses - signature failed.");
-        }
-
-        InputStream in = Snapshot.class.getResourceAsStream("/previousEpochsSpentAddresses.txt");
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in));
-        String line;
-        try {
-            while((line = reader.readLine()) != null) {
-                previousEpochsSpentAddresses.put(new Hash(line),true);
-            }
-        } catch (IOException e) {
-            log.error("Failed to load previousEpochsSpentAddresses.");
-        }
     }
 
     private void processRequest(final HttpServerExchange exchange) throws IOException {
@@ -227,8 +211,13 @@ public class API {
                 }
                 case "broadcastTransactions": {
                     final List<String> trytes = getParameterAsList(request,"trytes", TRYTES_SIZE);
-                    broadcastTransactionStatement(trytes);
-                    return AbstractResponse.createEmptyResponse();
+                    if (isBelowNewTransactionLimit(sourceAddress.getAddress(), trytes.size())) {
+                        broadcastTransactionStatement(trytes);
+                        return AbstractResponse.createEmptyResponse();
+                    }
+                    return ErrorResponse.create("This operations cannot be executed: Exceeded new transaction limit");
+
+
                 }
                 case "findTransactions": {
                     return findTransactionStatement(request);
@@ -311,8 +300,11 @@ public class API {
                 case "storeTransactions": {
                     try {
                         final List<String> trytes = getParameterAsList(request,"trytes", TRYTES_SIZE);
-                        storeTransactionStatement(trytes);
-                        return AbstractResponse.createEmptyResponse();
+                        if (isBelowNewTransactionLimit(sourceAddress.getAddress(), trytes.size())) {
+                            storeTransactionStatement(trytes);
+                            return AbstractResponse.createEmptyResponse();
+                        }
+                        return ErrorResponse.create("This operations cannot be executed: Exceeded new transaction limit");
                     } catch (RuntimeException e) {
                         //transaction not valid
                         return ErrorResponse.create("Invalid trytes input");
@@ -335,9 +327,14 @@ public class API {
                     final List<String> transactions = getParameterAsList(request,"tails", HASH_SIZE);
                     return checkConsistencyStatement(transactions);
                 }
-                case "wereAddressesSpentFrom": {
-                    final List<String> addresses = getParameterAsList(request,"addresses", HASH_SIZE);
-                    return wereAddressesSpentFromStatement(addresses);
+                case "setApiRateLimit": {
+                    final double limit = getParameterAsDouble(request, "limit");
+                    if(limit < 0) {
+                        return ErrorResponse.create("Invalid limit input");
+                    }
+                    setApiRateLimit(limit);
+                    log.info("Setting API Rate limit to: " + limit + " txs / sec" );
+                    return AbstractResponse.createEmptyResponse();
                 }
                 default: {
                     AbstractResponse response = ixi.processCommand(command, request);
@@ -356,66 +353,24 @@ public class API {
         }
     }
 
-    private AbstractResponse wereAddressesSpentFromStatement(List<String> addressesStr) throws Exception {
-        final List<Hash> addresses = addressesStr.stream().map(Hash::new).collect(Collectors.toList());
-        final boolean[] states = new boolean[addresses.size()];
-        int index = 0;
-
-        for (Hash address : addresses) {
-            states[index++] = wasAddressSpentFrom(address);
-        }
-        return wereAddressesSpentFrom.create(states);
-    }
-
-    private boolean wasAddressSpentFrom(Hash address) throws Exception {
-        if (previousEpochsSpentAddresses.containsKey(address)) {
+    private boolean isBelowNewTransactionLimit(InetAddress sourceAddress, int size) {
+        int newTransactionsLimitInt = newTransactionsLimit.get();
+        if (newTransactionsLimitInt == 0) {
             return true;
         }
-        Set<Hash> hashes = AddressViewModel.load(instance.tangle, address).getHashes();
-        for (Hash hash : hashes) {
-            final TransactionViewModel tx = TransactionViewModel.fromHash(instance.tangle, hash);
-            //spend
-            if (tx.value() < 0) {
-                //confirmed
-                if (tx.snapshotIndex() != 0) {
-                    return true;
-                }
-                //pending
-                Hash tail = findTail(hash);
-                if (tail != null && BundleValidator.validate(instance.tangle, tail).size() != 0) {
-                    return true;
-                }
-            }
+
+        long now = System.currentTimeMillis();
+        if ((now - broadcastStoreTimer.get()) >  Neighbor.newTransactionsWindow) {
+            broadcastStoreCounters.clear();
+            broadcastStoreTimer.set(now);
         }
-        return false;
+
+        if(broadcastStoreCounters.putIfAbsent(sourceAddress, new AtomicInteger(size)) == null) { //not already in counter
+            return size < newTransactionsLimitInt;
+        } else {
+            return broadcastStoreCounters.get(sourceAddress).addAndGet(size) < newTransactionsLimitInt;
+        }
     }
-
-    private Hash findTail(Hash hash) throws Exception {
-        TransactionViewModel tx = TransactionViewModel.fromHash(instance.tangle, hash);
-        final Hash bundleHash = tx.getBundleHash();
-        long index = tx.getCurrentIndex();
-        boolean foundApprovee = false;
-        while (index-- > 0 && tx.getBundleHash().equals(bundleHash)) {
-            Set<Hash> approvees = tx.getApprovers(instance.tangle).getHashes();
-            for (Hash approvee : approvees) {
-                TransactionViewModel nextTx = TransactionViewModel.fromHash(instance.tangle, approvee);
-                if (nextTx.getBundleHash().equals(bundleHash)) {
-                    tx = nextTx;
-                    foundApprovee = true;
-                    break;
-                }
-            }
-            if (!foundApprovee) {
-                break;
-            }
-        }
-        if (tx.getCurrentIndex() == 0) {
-            return tx.getHash();
-        }
-        return null;
-    }
-
-
     private AbstractResponse checkConsistencyStatement(List<String> transactionsList) throws Exception {
         final List<Hash> transactions = transactionsList.stream().map(Hash::new).collect(Collectors.toList());
         boolean state = true;
@@ -436,7 +391,7 @@ public class API {
                 state = false;
                 info = "tails are not solid (missing a referenced tx): " + transaction;
                 break;
-            } else if (BundleValidator.validate(instance.tangle, txVM.getHash()).size() == 0) {
+            } else if (BundleValidator.validate(instance.tangle, txVM.getBundleHash()).size() == 0) {
                 state = false;
                 info = "tails are not consistent (bundle is invalid): " + transaction;
                 break;
@@ -444,15 +399,9 @@ public class API {
         }
 
         if (state) {
-            instance.milestone.latestSnapshot.rwlock.readLock().lock();
-            try {
-
-                if (!instance.ledgerValidator.checkConsistency(transactions)) {
-                    state = false;
-                    info = "tails are not consistent (would lead to inconsistent ledger state)";
-                }
-            } finally {
-                instance.milestone.latestSnapshot.rwlock.readLock().unlock();
+            if (!instance.ledgerValidator.checkConsistency(instance.milestone.latestSnapshot, transactions)) {
+                state = false;
+                info = "tails are not consistent (would lead to inconsistent ledger state)";
             }
         }
 
@@ -568,54 +517,40 @@ public class API {
         ellapsedTime_getTxToApprove += ellapsedTime;
     }
 
-    public synchronized Hash[] getTransactionToApproveStatement(int depth, final String reference, final int numWalks) throws Exception {
+    public synchronized Hash[] getTransactionToApproveStatement(final int depth, final String reference, final int numWalks) throws Exception {
         int tipsToApprove = 2;
         Hash[] tips = new Hash[tipsToApprove];
         final SecureRandom random = new SecureRandom();
         final int randomWalkCount = numWalks > maxRandomWalks || numWalks < 1 ? maxRandomWalks:numWalks;
         Hash referenceHash = null;
-        int maxDepth = instance.tipsManager.getMaxDepth();
-        if (depth > maxDepth) {
-            depth = maxDepth;
-        }
         if(reference != null) {
             referenceHash = new Hash(reference);
-            if (!TransactionViewModel.exists(instance.tangle, referenceHash)) {
-                throw new RuntimeException(REFERENCE_TRANSACTION_NOT_FOUND);
-            } else {
-                TransactionViewModel transactionViewModel = TransactionViewModel.fromHash(instance.tangle, referenceHash);
-                if (transactionViewModel.snapshotIndex() != 0
-                        && transactionViewModel.snapshotIndex() < instance.milestone.latestSolidSubtangleMilestoneIndex - depth) {
-                    throw new RuntimeException(REFERENCE_TRANSACTION_TOO_OLD);
-                }
+            if(!TransactionViewModel.exists(instance.tangle, referenceHash)) {
+                referenceHash = null;
             }
         }
+        Snapshot referenceSnapshot;
+        synchronized (instance.milestone.latestSnapshot.snapshotSyncObject) {
+            referenceSnapshot = new Snapshot(instance.milestone.latestSnapshot);
+        }
+        for(int i = 0; i < tipsToApprove; i++) {
+            tips[i] = instance.tipsManager.transactionToApprove(referenceSnapshot, referenceHash, tips[0], depth, randomWalkCount, random);
+            if (tips[i] == null) {
+                return null;
+            }
+        }
+        API.incCounter_getTxToApprove();
+        if ( ( getCounter_getTxToApprove() % 100) == 0 ) {
+            String sb = "Last 100 getTxToApprove consumed " +
+                    API.getEllapsedTime_getTxToApprove() / 1000000000L +
+                    " seconds processing time.";
+            log.info(sb);
+            counter_getTxToApprove = 0;
+            ellapsedTime_getTxToApprove = 0L;
+        }
 
-        instance.milestone.latestSnapshot.rwlock.readLock().lock();
-        try {
-            Set<Hash> visitedHashes = new HashSet<>();
-            Map<Hash, Long> diff = new HashMap<>();
-            for (int i = 0; i < tipsToApprove; i++) {
-                tips[i] = instance.tipsManager.transactionToApprove(visitedHashes, diff, referenceHash, tips[0], depth, randomWalkCount, random);
-                if (tips[i] == null) {
-                    return null;
-                }
-            }
-            API.incCounter_getTxToApprove();
-            if ((getCounter_getTxToApprove() % 100) == 0) {
-                String sb = "Last 100 getTxToApprove consumed " +
-                        API.getEllapsedTime_getTxToApprove() / 1000000000L +
-                        " seconds processing time.";
-                log.info(sb);
-                counter_getTxToApprove = 0;
-                ellapsedTime_getTxToApprove = 0L;
-            }
-
-            if (instance.ledgerValidator.checkConsistency(Arrays.asList(tips))) {
-                return tips;
-            }
-        } finally {
-            instance.milestone.latestSnapshot.rwlock.readLock().unlock();
+        if (instance.ledgerValidator.checkConsistency(instance.milestone.latestSnapshot, Arrays.asList(tips))) {
+            return tips;
         }
         throw new RuntimeException("inconsistent tips pair selected");
     }
@@ -657,8 +592,8 @@ public class API {
 
         List<Integer> tipsIndex = new LinkedList<>();
         {
-            for(Hash tip: tips) {
-                TransactionViewModel tx = TransactionViewModel.fromHash(instance.tangle, tip);
+            for(Hash hash: tips) {
+                TransactionViewModel tx = TransactionViewModel.fromHash(instance.tangle, hash);
                 if (tx.getType() != TransactionViewModel.PREFILLED_SLOT) {
                     tipsIndex.add(tx.snapshotIndex());
                 }
@@ -667,47 +602,42 @@ public class API {
         int minTipsIndex = tipsIndex.stream().reduce((a,b) -> a < b ? a : b).orElse(0);
         if(minTipsIndex > 0) {
             int maxTipsIndex = tipsIndex.stream().reduce((a,b) -> a > b ? a : b).orElse(0);
-            int count = 0;
             for(Hash hash: transactions) {
                 TransactionViewModel transaction = TransactionViewModel.fromHash(instance.tangle, hash);
                 if(transaction.getType() == TransactionViewModel.PREFILLED_SLOT || transaction.snapshotIndex() == 0) {
-                    inclusionStates[count] = -1;
+                    inclusionStates[transactions.indexOf(transaction.getHash())] = -1;
                 } else if(transaction.snapshotIndex() > maxTipsIndex) {
-                    inclusionStates[count] = -1;
+                    inclusionStates[transactions.indexOf(transaction.getHash())] = -1;
                 } else if(transaction.snapshotIndex() < maxTipsIndex) {
-                    inclusionStates[count] = 1;
+                    inclusionStates[transactions.indexOf(transaction.getHash())] = 1;
                 }
-                count++;
             }
         }
 
         Set<Hash> analyzedTips = new HashSet<>();
-        Map<Integer, Integer> sameIndexTransactionCount = new HashMap<>();
-        Map<Integer, Queue<Hash>> sameIndexTips = new HashMap<>();
+        Map<Integer, Set<Hash>> sameIndexTips = new HashMap<>();
+        Map<Integer, Set<Hash>> sameIndexTransactions = new HashMap<>();
+        Map<Integer, Queue<Hash>> nonAnalyzedTransactionsMap = new HashMap<>();
         for (final Hash tip : tips) {
             TransactionViewModel transactionViewModel = TransactionViewModel.fromHash(instance.tangle, tip);
             if (transactionViewModel.getType() == TransactionViewModel.PREFILLED_SLOT){
                 return ErrorResponse.create("One of the tips absents");
             }
-            int snapshotIndex = transactionViewModel.snapshotIndex();
-            sameIndexTips.putIfAbsent(snapshotIndex, new LinkedList<>());
-            sameIndexTips.get(snapshotIndex).add(tip);
+            sameIndexTips.putIfAbsent(transactionViewModel.snapshotIndex(), new HashSet<>());
+            sameIndexTips.get(transactionViewModel.snapshotIndex()).add(tip);
+            nonAnalyzedTransactionsMap.putIfAbsent(transactionViewModel.snapshotIndex(), new LinkedList<>());
+            nonAnalyzedTransactionsMap.get(transactionViewModel.snapshotIndex()).offer(tip);
         }
         for(int i = 0; i < inclusionStates.length; i++) {
             if(inclusionStates[i] == 0) {
                 TransactionViewModel transactionViewModel = TransactionViewModel.fromHash(instance.tangle, transactions.get(i));
-                int snapshotIndex = transactionViewModel.snapshotIndex();
-                sameIndexTransactionCount.putIfAbsent(snapshotIndex, 0);
-                sameIndexTransactionCount.put(snapshotIndex, sameIndexTransactionCount.get(snapshotIndex) + 1);
+                sameIndexTransactions.putIfAbsent(transactionViewModel.snapshotIndex(), new HashSet<>());
+                sameIndexTransactions.get(transactionViewModel.snapshotIndex()).add(transactionViewModel.getHash());
             }
         }
-        for(Integer index : sameIndexTransactionCount.keySet()) {
-            Queue<Hash> sameIndexTip = sameIndexTips.get(index);
-            if (sameIndexTip != null) {
-                //has tips in the same index level
-                if (!exhaustiveSearchWithinIndex(sameIndexTip, analyzedTips, transactions, inclusionStates, sameIndexTransactionCount.get(index), index)) {
-                    return ErrorResponse.create("The subtangle is not solid");
-                }
+        for(Map.Entry<Integer, Set<Hash>> entry: sameIndexTransactions.entrySet()) {
+            if(!exhaustiveSearchWithinIndex(nonAnalyzedTransactionsMap.get(entry.getKey()), analyzedTips, transactions, inclusionStates, entry.getValue().size(), entry.getKey())) {
+                return ErrorResponse.create("The subtangle is not solid");
             }
         }
         final boolean[] inclusionStatesBoolean = new boolean[inclusionStates.length];
@@ -722,16 +652,20 @@ public class API {
         Hash pointer;
         MAIN_LOOP:
         while ((pointer = nonAnalyzedTransactions.poll()) != null) {
+
+
             if (analyzedTips.add(pointer)) {
+
                 final TransactionViewModel transactionViewModel = TransactionViewModel.fromHash(instance.tangle, pointer);
-                if (transactionViewModel.snapshotIndex() == index) {
+                if(transactionViewModel.snapshotIndex() == index) {
                     if (transactionViewModel.getType() == TransactionViewModel.PREFILLED_SLOT) {
                         return false;
                     } else {
                         for (int i = 0; i < inclusionStates.length; i++) {
+
                             if (inclusionStates[i] < 1 && pointer.equals(transactions.get(i))) {
                                 inclusionStates[i] = 1;
-                                if (--count <= 0) {
+                                if (--count<= 0) {
                                     break MAIN_LOOP;
                                 }
                             }
@@ -863,40 +797,56 @@ public class API {
         final List<Hash> addresses = addrss.stream().map(address -> (new Hash(address)))
                 .collect(Collectors.toCollection(LinkedList::new));
         final List<Hash> hashes;
-        final Map<Hash, Long> balances = new HashMap<>();
-        instance.milestone.latestSnapshot.rwlock.readLock().lock();
-        final int index = instance.milestone.latestSnapshot.index();
         if (tips == null || tips.size() == 0) {
             hashes = Collections.singletonList(instance.milestone.latestSolidSubtangleMilestone);
         } else {
             hashes = tips.stream().map(address -> (new Hash(address)))
                     .collect(Collectors.toCollection(LinkedList::new));
         }
-        try {
-            for (final Hash address : addresses) {
-                Long value = instance.milestone.latestSnapshot.getBalance(address);
-                if (value == null) value = 0L;
-                balances.put(address, value);
-            }
 
-            final Set<Hash> visitedHashes;
-            final Map<Hash, Long> diff;
-
-            visitedHashes = new HashSet<>();
-            diff = new HashMap<>();
-            for (Hash tip : hashes) {
-                if (!TransactionViewModel.exists(instance.tangle, tip)) {
-                    return ErrorResponse.create("Tip not found: " + tip.toString());
-                }
-                if (!instance.ledgerValidator.updateDiff(visitedHashes, diff, tip)) {
-                    return ErrorResponse.create("Tips are not consistent");
-                }
+        final Map<Hash, Long> balances = new HashMap<>();
+        final int index;
+        Snapshot referenceSnapshot;
+        synchronized (instance.milestone.latestSnapshot.snapshotSyncObject) {
+            referenceSnapshot = new Snapshot(instance.milestone.latestSnapshot);
+        }
+        index = referenceSnapshot.index();
+        for(Hash hash: hashes) {
+            if (!TransactionViewModel.exists(instance.tangle, hash)) {
+                return ErrorResponse.create("Tip not found: " + hash.toString());
             }
-            diff.forEach((key, value) -> balances.computeIfPresent(key, (hash, aLong) -> value + aLong));
-        } finally {
-            instance.milestone.latestSnapshot.rwlock.readLock().unlock();
+            if (!instance.ledgerValidator.isTipConsistent(referenceSnapshot, hash)) {
+                return ErrorResponse.create("Tips are not consistent");
+            }
+        }
+        for (final Hash address : addresses) {
+            balances.put(address, referenceSnapshot.getState().containsKey(address) ? referenceSnapshot.getState().get(address) : Long.valueOf(0));
         }
 
+
+        final Queue<Hash> nonAnalyzedTransactions = new LinkedList<>(hashes);
+        Hash hash;
+        while ((hash = nonAnalyzedTransactions.poll()) != null) {
+
+            if (referenceSnapshot.approvedHashes.add(hash)) {
+
+                final TransactionViewModel transactionViewModel = TransactionViewModel.fromHash(instance.tangle, hash);
+
+                if(transactionViewModel.snapshotIndex() == 0 || transactionViewModel.snapshotIndex() > index) {
+                    if (transactionViewModel.value() != 0) {
+
+                        final Hash address = transactionViewModel.getAddressHash();
+                        final Long balance = balances.get(address);
+                        if (balance != null) {
+
+                            balances.put(address, balance + transactionViewModel.value());
+                        }
+                    }
+                    nonAnalyzedTransactions.offer(transactionViewModel.getTrunkTransactionHash());
+                    nonAnalyzedTransactions.offer(transactionViewModel.getBranchTransactionHash());
+                }
+            }
+        }
         final List<String> elements = addresses.stream().map(address -> balances.get(address).toString())
                 .collect(Collectors.toCollection(LinkedList::new));
 
@@ -919,7 +869,7 @@ public class API {
         ellapsedTime_PoW += ellapsedTime;
     }
 
-    public synchronized List<String> attachToTangleStatement(final Hash trunkTransaction, final Hash branchTransaction,
+    public List<String> attachToTangleStatement(final Hash trunkTransaction, final Hash branchTransaction,
                                                                   final int minWeightMagnitude, final List<String> trytes) {
         final List<TransactionViewModel> transactionViewModels = new LinkedList<>();
 
@@ -956,7 +906,7 @@ public class API {
                 Converter.copyTrits(MAX_TIMESTAMP_VALUE,transactionTrits,TransactionViewModel.ATTACHMENT_TIMESTAMP_UPPER_BOUND_TRINARY_OFFSET,
                         TransactionViewModel.ATTACHMENT_TIMESTAMP_UPPER_BOUND_TRINARY_SIZE);
 
-                if (!pearlDiver.search(transactionTrits, minWeightMagnitude, 0)) {
+                if (!pearlDiver.my_search(transactionTrits, minWeightMagnitude)) {
                     transactionViewModels.clear();
                     break;
                 }
@@ -1050,6 +1000,11 @@ public class API {
         Matcher matcher = trytesPattern.matcher(trytes);
         return matcher.matches();
     }
+    
+    public void setApiRateLimit(double apiRateLimit) {
+        newTransactionsLimit.set((int) ((apiRateLimit * Neighbor.newTransactionsWindow) / 1000));
+    }
+                
 
     private static void setupResponseHeaders(final HttpServerExchange exchange) {
         final HeaderMap headerMap = exchange.getResponseHeaders();
