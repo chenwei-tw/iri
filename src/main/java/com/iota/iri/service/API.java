@@ -906,6 +906,15 @@ public class API {
                 Converter.copyTrits(MAX_TIMESTAMP_VALUE,transactionTrits,TransactionViewModel.ATTACHMENT_TIMESTAMP_UPPER_BOUND_TRINARY_OFFSET,
                         TransactionViewModel.ATTACHMENT_TIMESTAMP_UPPER_BOUND_TRINARY_SIZE);
 
+                if (transaction.length != TRANSACTION_LENGTH) {
+                    throw new RuntimeException(
+                        "Invalid transaction trits length: " + tansactionTrits.length);
+                }
+
+                if (minWeightMagnitude < 0 || minWeightMagnitude > CURL_HASH_LENGTH) {
+                    throw new RuntimeException("Invalid min weight magnitude: " + minWeightMagnitude);
+                }
+
                 if (!pearlDiver.my_search(transactionTrits, minWeightMagnitude)) {
                     transactionViewModels.clear();
                     break;

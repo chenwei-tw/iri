@@ -55,14 +55,6 @@ public class PearlDiver {
     public synchronized boolean search(final int[] transactionTrits, final int minWeightMagnitude,
         int numberOfThreads) {
 
-        if (transactionTrits.length != TRANSACTION_LENGTH) {
-            throw new RuntimeException(
-                "Invalid transaction trits length: " + transactionTrits.length);
-        }
-        if (minWeightMagnitude < 0 || minWeightMagnitude > CURL_HASH_LENGTH) {
-            throw new RuntimeException("Invalid min weight magnitude: " + minWeightMagnitude);
-        }
-
         synchronized (syncObj) {
             state = RUNNING;
         }
