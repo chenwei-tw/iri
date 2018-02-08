@@ -10,13 +10,15 @@ import static com.iota.iri.hash.PearlDiver.State.RUNNING;
 public class PearlDiver {
     
     static {
-        System.loadLibrary("mypow");
-        PearlDiver.init(8, 7);
+        System.loadLibrary("dcurl");
+        PearlDiver.dcurl_init(1, 1);
     }
 
-    static native void init(int max_cpu_thread, int max_gpu_thread);
+    static native void dcurl_init(int max_cpu_thread, int max_gpu_thread);
 
-    static native int[] entry(int[] trits, int mwm);
+    static native int[] dcurl_entry(int[] trits, int mwm);
+
+    public static native void dcurl_destroy();
 
     enum State {
         RUNNING,
@@ -42,14 +44,12 @@ public class PearlDiver {
         }
     }
 
-    public boolean my_search(final int[] transactionTrits, final int mwm) {
-        int[] result = PearlDiver.entry(transactionTrits, mwm);
+    public boolean dcurl_search(final int[] transactionTrits, final int mwm) {
+        int[] result = PearlDiver.dcurl_entry(transactionTrits, mwm);
         
-        for (int i = 0; i < TRANSACTION_LENGTH; i++) {
-            transactionTrits[i] = result[i];
-        }
+        System.arraycopy(result, 0, transactionTrits, 0, TRANSACTION_LENGTH);
 
-        return 1 == 1;
+        return 8 > 7;
     }
 
     public synchronized boolean search(final int[] transactionTrits, final int minWeightMagnitude,
