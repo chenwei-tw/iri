@@ -15,7 +15,7 @@ import org.junit.Test;
 public class PearlDiverTest {
 
     private static final int TRYTE_LENGTH = 2673;
-    private static final int MIN_WEIGHT_MAGNITUDE = 9;
+    private static final int MIN_WEIGHT_MAGNITUDE = 14;
     private static final int NUM_CORES = -1; // use n-1 cores
 
     private PearlDiver pearlDiver;
@@ -26,7 +26,7 @@ public class PearlDiverTest {
         pearlDiver = new PearlDiver();
         hashTrits = new int[Curl.HASH_LENGTH];
     }
-
+    /*
     @Test
     public void testRandomTryteHash() {
         String hash = getHashFor(getRandomTrytes());
@@ -34,6 +34,7 @@ public class PearlDiverTest {
         assertTrue("The hash should have n nines", success);
     }
 
+    
     @Test
     public void testCancel() {
         pearlDiver.cancel();
@@ -48,13 +49,15 @@ public class PearlDiverTest {
     public void testInvalidTritsLength() {
         pearlDiver.search(new int[0], MIN_WEIGHT_MAGNITUDE, NUM_CORES);
     }
+    */
 
     @Test
-    @Ignore("to test pearlDiver iteratively")
+    //@Ignore("to test pearlDiver iteratively")
     public void testNoRandomFail() {
-        for (int i = 0; i < 10000; i++) {
+        for (int i = 0; i < 1000; i++) {
             int[] trits = TransactionViewModelTest.getRandomTransactionTrits();
-            pearlDiver.search(trits, MIN_WEIGHT_MAGNITUDE, NUM_CORES);
+            //pearlDiver.search(trits, MIN_WEIGHT_MAGNITUDE, NUM_CORES);
+            pearlDiver.dcurl_search(trits, MIN_WEIGHT_MAGNITUDE);
             Hash hash = Hash.calculate(SpongeFactory.Mode.CURLP81, trits);
             for (int j = Hash.SIZE_IN_TRITS - 1; j > Hash.SIZE_IN_TRITS - MIN_WEIGHT_MAGNITUDE; j--) {
                 assertEquals(hash.trits()[j], 0);
@@ -69,7 +72,8 @@ public class PearlDiverTest {
         Sponge curl = new Curl(SpongeFactory.Mode.CURLP81);
         int[] myTrits = Converter.allocateTritsForTrytes(trytes.length());
         Converter.trits(trytes, myTrits, 0);
-        pearlDiver.search(myTrits, MIN_WEIGHT_MAGNITUDE, NUM_CORES);
+        //pearlDiver.search(myTrits, MIN_WEIGHT_MAGNITUDE, NUM_CORES);
+        pearlDiver.dcurl_search(myTrits, MIN_WEIGHT_MAGNITUDE);
         curl.absorb(myTrits, 0, myTrits.length);
         curl.squeeze(hashTrits, 0, Curl.HASH_LENGTH);
         curl.reset();
