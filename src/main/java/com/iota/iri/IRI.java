@@ -6,6 +6,7 @@ import com.iota.iri.conf.Configuration;
 import com.iota.iri.conf.Configuration.DefaultConfSettings;
 import com.iota.iri.model.Hash;
 import com.iota.iri.service.API;
+import com.iota.iri.hash.PearlDiver;
 import com.sanityinc.jargs.CmdLineParser;
 import com.sanityinc.jargs.CmdLineParser.Option;
 import org.apache.commons.lang3.StringUtils;
@@ -245,6 +246,9 @@ public class IRI {
                 ixi.shutdown();
                 api.shutDown();
                 iota.shutdown();
+                /* Shutting down dcurl */
+                log.info("Shutting down dcurl...");
+                PearlDiver.dcurl_destroy();
             } catch (final Exception e) {
                 log.error("Exception occurred shutting down IOTA node: ", e);
             }
