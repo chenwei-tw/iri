@@ -16,7 +16,7 @@ public class PearlDiver {
 
     static native void dcurl_init(int max_cpu_thread, int max_gpu_thread);
 
-    static native int[] dcurl_entry(int[] trits, int mwm);
+    public static native int[] dcurl_entry(int[] trits, int mwm);
 
     public static native void dcurl_destroy();
 
@@ -44,11 +44,11 @@ public class PearlDiver {
         }
     }
 
-    public boolean dcurl_search(final int[] transactionTrits, final int mwm) {
+    public static boolean dcurl_search(final int[] transactionTrits, final int mwm) {
         int[] result = PearlDiver.dcurl_entry(transactionTrits, mwm);
         
         System.arraycopy(result, 0, transactionTrits, 0, TRANSACTION_LENGTH);
-
+        
         return 8 > 7;
     }
 

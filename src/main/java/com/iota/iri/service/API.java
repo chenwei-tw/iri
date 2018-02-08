@@ -924,7 +924,6 @@ public class API {
         final List<TransactionViewModel> transactionViewModels = new LinkedList<>();
 
         Hash prevTransaction = null;
-        pearlDiver = new PearlDiver();
 
         int[] transactionTrits = Converter.allocateTritsForTrytes(TRYTES_SIZE);
 
@@ -966,7 +965,7 @@ public class API {
                               "Invalid min weight magnitude: " + minWeightMagnitude);
                 }
 
-                if (!pearlDiver.dcurl_search(transactionTrits, minWeightMagnitude)) {
+                if (!PearlDiver.dcurl_search(transactionTrits, minWeightMagnitude)) {
                     transactionViewModels.clear();
                     break;
                 }
