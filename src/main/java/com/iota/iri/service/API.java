@@ -103,6 +103,7 @@ public class API {
         maxBodyLength = configuration.getMaxBodyLength();
         testNet = configuration.isTestnet();
         milestoneStartIndex = ((ConsensusConfig) configuration).getMilestoneStartIndex();
+        PearlDiver.init(instance.configuration.getExternalPoWLib());
 
         previousEpochsSpentAddresses = new ConcurrentHashMap<>();
     }
