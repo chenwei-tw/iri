@@ -109,6 +109,7 @@ public class IRI {
         final Option<Boolean> sync = parser.addBooleanOption("sync");
         final Option<Boolean> dnsResolutionFalse = parser.addBooleanOption("dns-resolution-false");
         final Option<String> maxPeers = parser.addStringOption("max-peers");
+        final Option<String> pearldiver_exlib = parser.addStringOption("pearldiver-exlib");
 
         try {
             assert args != null;
@@ -219,6 +220,11 @@ public class IRI {
         if (vmaxPeers != null) {
             configuration.put(DefaultConfSettings.MAX_PEERS, vmaxPeers);
         }
+
+        final String pdExlib = parser.getOptionValue(pearldiver_exlib);
+        if (pdExlib != null) {
+            configuration.put(DefaultConfSettings.PD_EXLIB, pdExlib);
+        }
     }
 
     private static void printUsage() {
@@ -232,7 +238,8 @@ public class IRI {
                         "[{--testnet} false]" +
                         "[{--remote} false]" +
                         "[{--remote-auth} string]" +
-                        "[{--remote-limit-api} string]"
+                        "[{--remote-limit-api} string]" +
+                        "[{--pearldiver-exlib] string]"
                 , MAINNET_NAME, VERSION);
         System.exit(0);
     }

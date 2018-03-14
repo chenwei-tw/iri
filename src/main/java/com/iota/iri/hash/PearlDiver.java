@@ -28,10 +28,9 @@ public class PearlDiver {
 
     private static boolean isExternal;
     
-    static {
+    public static void init(String exlib_name) {
         try {
-            /* TODO: Load specific library by jvm options */
-            System.loadLibrary("dcurl");
+            System.loadLibrary(exlib_name);
             PearlDiver.exlib_init();
             isExternal = true;
         } catch (java.lang.UnsatisfiedLinkError e) {

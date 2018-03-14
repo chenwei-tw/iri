@@ -110,6 +110,8 @@ public class API {
         maxRequestList = instance.configuration.integer(DefaultConfSettings.MAX_REQUESTS_LIST);
         maxGetTrytes = instance.configuration.integer(DefaultConfSettings.MAX_GET_TRYTES);
         maxBodyLength = instance.configuration.integer(DefaultConfSettings.MAX_BODY_LENGTH);
+        
+        PearlDiver.init(instance.configuration.string(DefaultConfSettings.PD_EXLIB));
 
         previousEpochsSpentAddresses = new ConcurrentHashMap<>();
 

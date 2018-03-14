@@ -48,6 +48,7 @@ public class Configuration {
         MAIN_DB, EXPORT, // exports transaction trytes to filesystem
         SEND_LIMIT,
         MAX_PEERS,
+        PD_EXLIB,
         DNS_RESOLUTION_ENABLED,
         DNS_REFRESHER_ENABLED,
         COORDINATOR,
@@ -97,6 +98,7 @@ public class Configuration {
         conf.put(DefaultConfSettings.EXPORT.name(), "false");
         conf.put(DefaultConfSettings.SEND_LIMIT.name(), "-1.0");
         conf.put(DefaultConfSettings.MAX_PEERS.name(), "0");
+        conf.put(DefaultConfSettings.PD_EXLIB.name(), "NO_THIS_LIB");
         conf.put(DefaultConfSettings.DNS_REFRESHER_ENABLED.name(), "true");
         conf.put(DefaultConfSettings.DNS_RESOLUTION_ENABLED.name(), "true");
         conf.put(DefaultConfSettings.REVALIDATE.name(), "false");
