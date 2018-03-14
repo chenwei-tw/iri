@@ -51,7 +51,7 @@ public class MessageQ {
             LOG.error("Publisher service shutdown failed.", e);
         }
 
-        publisher.close();
-        context.term();
+        if(publisher != null) publisher.close();
+        if(context != null) context.term();
     }
 }
